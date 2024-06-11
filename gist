@@ -1,0 +1,32 @@
+#!/bin/bash
+source token_artifactory.sh
+source token_catalog.sh
+# Query the list of files from a remote CACHE repository
+RESULTS=`curl -H"Authorization: Bearer $ACCESS_TOKEN_ARTIFACTORY" https://soleng.jfrog.io/artifactory/api/storage/python-remote-cache\?list\&listFolders\=0\&deep\=1 | jq -r '.files | map({uri: (.uri | split("/") | last) })[].uri  ' | sort `
+
+while IFS= read -r LINE; do
+  echo $LINE
+  if [[ $LINE =~ .html$ ]] ; then
+      # filtering out HTML files
+      continue
+  elif [[ $LINE =~ .tar.gz$ ]] ; then
+      # if tar.gz (usually sources for a package)
+      PKG_ARR=(`echo $LINE | sed -e 's/\.tar\.gz$//g' | sed -e 's/-/ /g'`)
+      PKG_NAME=(`echo "${PKG_ARR[@]::${#PKG_ARR[@]}-1}" | sed -e 's/ /-/g'  -e 's/_/-/g'`)
+      PKG_VER=(`echo ${PKG_ARR[${#PKG_ARR[@]} - 1]}`)
+  elif [[ $LINE =~ .whl$ ]] ; then
+      # if whl file
+      PKG_ARR=(`echo $LINE | sed -e 's/\.whl$//g' | sed -e 's/-/ /g'`)
+      PKG_NAME=(`echo "${PKG_ARR[0]}" | sed -e 's/_/-/g'`)
+      PKG_VER=(`echo ${PKG_ARR[1]}`)
+  else
+      echo "UNKNOWN EXTENSION for: $LINE"
+      continue
+  fi
+  # prepare the GraphQL request body for Catalog
+  REQBODY="{\"operationName\":\"GetPackageVersionID\",\"variables\":{\"type\":\"pypi\",\"name\":\"$PKG_NAME\",\"version\":\"$PKG_VER\"},\"query\":\"query GetPackageVersionID(\$type: String!, \$name: String!, \$version: String!) {\n  packageVersion(type: \$type, name: \$name, version: \$version) {\n    id\n    version\n    published @dateFormat(format: DD_MMM_YYYY)\n    modified\n    vcsUrl\n    licenseInfo {\n      licenses {\n        name\n      }\n      expression\n    }\n    dependencies(first: 1) {\n      totalCount\n    }\n    direct_dependencies: dependencies(\n      first: 1\n      where: {dependency: {isDirect: true}}\n    ) {\n      totalCount\n    }\n  }\n}\n\n\n\"}"
+  # Catalog request (taking only licenses names)
+  LICRES=`curl -XPOST -H"Authorization: Bearer $ACCESS_TOKEN_CATALOG" https://osslicenses.jfrog.io/xray/catalog/graphql -H'Content-Type: application/json' --data "$REQBODY"  | jq -r '.data.packageVersion.licenseInfo.licenses[] | .name' | tr '\n' ' ' `
+  # output to a CSV file
+  echo "$PKG_NAME,$PKG_VER,$LICRES" >> report.csv
+done <<< "$RESULTS"
